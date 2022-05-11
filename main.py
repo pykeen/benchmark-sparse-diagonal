@@ -7,6 +7,9 @@ from typing import Any, Collection, Iterable, Mapping, Optional, Tuple
 
 import pystow
 import torch
+import pandas
+import seaborn
+import numpy
 from pykeen.utils import resolve_device
 from torch.utils.benchmark import Measurement, Timer
 from tqdm.auto import tqdm
@@ -156,25 +159,52 @@ class ManualCoalesce(DiagonalExtraction):
 def main():
     """Time the different variants."""
     # fb15k237 sparsity ~ 300k / 15_000**2 = 0.001
-    density_grid = (1.0e-04, 1.0e-03, 1.0e-02)
-    n_grid = (4_000, 8_000, 16_000, 32_000, 64_000)
-    devices = sorted({torch.device("cpu"), resolve_device(device=None)})
-    measurements = []
+    density_grid = (1.0e-05, 1.0e-04, 1.0e-03, 1.0e-02)
+    n_grid = (500, 1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 512_000)
+    devices = sorted({torch.device("cpu"), resolve_device(device=None)}, key=lambda d: d.type)
+    cls_grid = (ExplicitPython, Coalesce, ManualCoalesce)
+    data = []
     with tqdm(
         (
             cls(kwargs=dict(n=n, density=density, device=device))
             for cls, n, density, device in itertools.product(
-                (ExplicitPython, Coalesce, ManualCoalesce),
+                cls_grid,
                 n_grid,
                 density_grid,
                 devices,
             )
-        )
+        ),
+        total=numpy.prod(list(map(len, (cls_grid, n_grid, density_grid, devices)))),
     ) as progress:
         for task in progress:
             progress.set_description(str(task))
-            measurements.append(task.buffered_measure())
-    print(measurements)
+            n, density, device = [task.kwargs[k] for k in ("n", "density", "device")]
+            # too slow
+            if n > 8_000 and isinstance(task, ExplicitPython):
+                continue
+            nnz = n**2 * density
+            # high memory consumption
+            if nnz > 10_000_000:
+                continue
+            measurement = task.buffered_measure()
+            data.append((task.name, n, density, device, measurement.median, measurement.mean, measurement.iqr))
+    # create table
+    df = pandas.DataFrame(data=data, columns=["name", "n", "density", "device", "median", "mean", "iqr"])
+    df["device"] = df["device"].astype(str)
+    keys = ["device", "n", "density", "name"]
+    df = df.sort_values(by=keys)
+    # create plot
+    grid = seaborn.relplot(
+        data=df,
+        x="n",
+        y="median",
+        col="device",
+        size="density",
+        kind="line",
+        hue="name",
+    )
+    grid.set(yscale="log", xscale="log")
+    grid.savefig("./img/comparison.svg")
 
 
 if __name__ == "__main__":
