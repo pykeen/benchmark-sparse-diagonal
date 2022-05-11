@@ -1,17 +1,80 @@
 """Benchmarks for random walk positional encoding."""
+import hashlib
 import itertools
-import multiprocessing
-import random
-from typing import Optional, Sequence
+import pathlib
+from collections import ChainMap
+from typing import Any, Collection, Iterable, Mapping, Optional, Tuple
 
-import numpy
-import pandas
-import seaborn
+import pystow
 import torch
-from torch.utils.benchmark import Compare, Timer
+from pykeen.utils import resolve_device
+from torch.utils.benchmark import Measurement, Timer
 from tqdm.auto import tqdm
 
-from pykeen.utils import resolve_device
+pystow_module = pystow.Module(base=pathlib.Path(__file__).parent.joinpath("data"))
+
+
+class BenchmarkItem:
+    def __init__(self, name: Optional[str] = None, kwargs: Optional[Mapping[str, Any]] = None) -> None:
+        self.name = name or self.__class__.__name__
+        self.kwargs = kwargs or {}
+
+    def _build_statement(self, prepared_kwargs: Iterable[str]) -> str:
+        return "".join(
+            (
+                self.name,
+                "(",
+                ", ".join(f"{key}={key}" for key in prepared_kwargs),
+                ")",
+            )
+        )
+
+    def measure(self) -> Measurement:
+        # build statement
+        prepared_kwargs = self.prepare(**self.kwargs)
+        kwargs = dict(
+            **{self.name: self.call},
+            **prepared_kwargs,
+        )
+        stmt = self._build_statement(prepared_kwargs=prepared_kwargs)
+        return Timer(stmt=stmt, globals=kwargs).blocked_autorange()
+
+    def iter_key_parts(self) -> Iterable[Tuple[str, Any]]:
+        yield from self.kwargs.items()
+
+    def __str__(self) -> str:
+        return "".join((f"{self.name}(", ", ".join(f"{k}={v}" for k, v in sorted(self.iter_key_parts())), ")"))
+
+    def key(self):
+        return hashlib.sha512(str(self).encode("utf8")).hexdigest()[:32]
+
+    def buffered_measure(self, force: bool = False) -> Measurement:
+        path = pystow_module.join(self.name, name=self.key() + ".pt")
+        if not force and path.is_file():
+            return torch.load(path)
+
+        measurement = self.measure()
+        torch.save(measurement, path)
+        return measurement
+
+    def call(self, **kwargs):
+        raise NotImplementedError
+
+    def prepare(self, **kwargs) -> Mapping[str, Any]:
+        return kwargs
+
+
+def dict_difference(d: Mapping[str, Any], exclude: Collection[str]) -> Mapping[str, Any]:
+    return {k: v for k, v in d.items() if k not in exclude}
+
+
+def create_sparse_matrix(n: int, density: float, device: Optional[torch.device] = None) -> torch.Tensor:
+    """Create a sparse matrix of the given size and (maximum) density."""
+    # TODO: the sparsity pattern may not be very natural for a graph
+    nnz = int(n**2 * density)
+    indices = torch.randint(n, size=(2, nnz), device=device)
+    values = torch.ones(nnz, device=device)
+    return torch.sparse_coo_tensor(indices=indices, values=values, size=(n, n))
 
 
 def sparse_eye(n: int, device: Optional[torch.device] = None) -> torch.Tensor:
@@ -30,152 +93,89 @@ def sparse_eye(n: int, device: Optional[torch.device] = None) -> torch.Tensor:
     return torch.sparse_coo_tensor(indices=indices, values=torch.ones(n, device=device))
 
 
-def extract_diagonal_explicit_loop(matrix: torch.Tensor) -> torch.Tensor:
+class DiagonalExtraction(BenchmarkItem):
+    def prepare(self, n: int, density: float, device: Optional[torch.device] = None, **kwargs) -> Mapping[str, Any]:
+        # TODO: the sparsity pattern may not be very natural for a graph
+        matrix = create_sparse_matrix(n=n, density=density, device=device)
+        return ChainMap(dict(matrix=matrix), kwargs)
+
+    def iter_key_parts(self) -> Iterable[Tuple[str, Any]]:
+        for key, value in super().iter_key_parts():
+            if key == "device" and value is not None:
+                assert isinstance(value, torch.device)
+                value = value.type
+            yield key, value
+
+
+class ExplicitPython(DiagonalExtraction):
     """Extract diagonal by item access and Python for-loop."""
-    n = matrix.shape[0]
-    d = torch.zeros(n, device=matrix.device)
 
-    # torch.sparse.coo only allows direct numbers here, can't feed an eye tensor here
-    for i in range(n):
-        d[i] = matrix[i, i]
+    def call(self, matrix: torch.Tensor, **kwargs):
+        n = matrix.shape[0]
+        d = torch.zeros(n, device=matrix.device)
 
-    return d
+        # torch.sparse.coo only allows direct numbers here, can't feed an eye tensor here
+        for i in range(n):
+            d[i] = matrix[i, i]
 
-
-def extract_diagonal_coalesce(matrix: torch.Tensor, eye: torch.Tensor) -> torch.Tensor:
-    """Extract diagonal using coalesce."""
-    n = matrix.shape[0]
-    d = torch.zeros(n, device=matrix.device)
-
-    d_sparse = (matrix * eye).coalesce()
-    indices = d_sparse.indices()
-    values = d_sparse.values()
-    d[indices] = values
-
-    return d
+        return d
 
 
-def extract_diagonal_manual_coalesce(matrix: torch.Tensor) -> torch.Tensor:
-    """Extract diagonal using a manual implementation accessing private functions of an instable API."""
-    n = matrix.shape[0]
-    d = torch.zeros(n, device=matrix.device)
+class Coalesce(DiagonalExtraction):
+    def prepare(self, n: int, **kwargs) -> Mapping[str, Any]:
+        kwargs = super().prepare(n=n, **kwargs)
+        return ChainMap(dict(eye=sparse_eye(n=n, device=kwargs.get("matrix").device)), kwargs)
 
-    indices = matrix._indices()
-    mask = indices[0] == indices[1]
-    diagonal_values = matrix._values()[mask]
-    diagonal_indices = indices[0][mask]
+    def call(self, matrix: torch.Tensor, eye: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Extract diagonal using coalesce."""
+        n = matrix.shape[0]
+        d = torch.zeros(n, device=matrix.device)
 
-    return d.scatter_add(dim=0, index=diagonal_indices, src=diagonal_values)
+        d_sparse = (matrix * eye).coalesce()
+        indices = d_sparse.indices()
+        values = d_sparse.values()
+        d[indices] = values
 
-
-def create_sparse_matrix(n: int, density: float) -> torch.Tensor:
-    """Create a sparse matrix of the given size and (maximum) density."""
-    # TODO: the sparsity pattern may not be very natural for a graph
-    nnz = int(n**2 * density)
-    indices = torch.randint(n, size=(2, nnz))
-    values = torch.ones(nnz)
-    return torch.sparse_coo_tensor(indices=indices, values=values, size=(n, n))
+        return d
 
 
-def test_extract_diagonal():
-    """Test that all three methods yield the same result."""
-    n = 16_000
-    sparsity = 1.0e-03
-    matrix = create_sparse_matrix(n=n, density=sparsity)
-    eye = sparse_eye(n=n)
-    reference = extract_diagonal_coalesce(matrix=matrix, eye=eye)
-    assert torch.allclose(extract_diagonal_explicit_loop(matrix=matrix), reference)
-    assert torch.allclose(extract_diagonal_manual_coalesce(matrix=matrix), reference)
+class ManualCoalesce(DiagonalExtraction):
+    def call(self, matrix: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Extract diagonal using a manual implementation accessing private functions of an instable API."""
+        n = matrix.shape[0]
+        d = torch.zeros(n, device=matrix.device)
+
+        indices = matrix._indices()
+        mask = indices[0] == indices[1]
+        diagonal_values = matrix._values()[mask]
+        diagonal_indices = indices[0][mask]
+
+        return d.scatter_add(dim=0, index=diagonal_indices, src=diagonal_values)
 
 
-class Grid:
-    def __init__(self, *iters: Sequence, shuffle: bool = False) -> None:
-        self.size = numpy.prod(map(len, iters))
-        grid = itertools.product(*iters)
-        if shuffle:
-            grid = list(grid)
-            random.shuffle(grid)
-        self.grid = grid
-
-    def __len__(self) -> int:
-        return self.size
-
-    def __iter__(self):
-        yield from self.grid
-
-
-def time_extract_diagonal(fast: bool = False):
+def main():
     """Time the different variants."""
-    n_cpu = multiprocessing.cpu_count()
     # fb15k237 sparsity ~ 300k / 15_000**2 = 0.001
     density_grid = (1.0e-04, 1.0e-03, 1.0e-02)
-    num_threads_grid = (1, n_cpu // 2, n_cpu)
     n_grid = (4_000, 8_000, 16_000, 32_000, 64_000)
-    methods = (
-        "extract_diagonal_coalesce(matrix=matrix, eye=eye)",
-        # "extract_diagonal_explicit_loop(matrix=matrix)",
-        "extract_diagonal_manual_coalesce(matrix=matrix)",
-    )
-    # fast run
-    if fast:
-        num_threads_grid = (1,)
-        n_grid = (8_000,)
-        density_grid = (1.0e-02,)
+    devices = sorted({torch.device("cpu"), resolve_device(device=None)})
     measurements = []
-    data = []
-    device = resolve_device(device=None)
-    for stmt, num_threads, n, density in tqdm(
-        Grid(
-            methods,
-            num_threads_grid,
-            n_grid,
-            density_grid,
-            # we shuffle here to have a more consistent time estimate of tqdm
-            shuffle=True,
-        ),
-        unit="configuration",
-        unit_scale=True,
-    ):
-        measurement = Timer(
-            stmt=stmt,
-            setup=f"matrix=create_sparse_matrix(n={n}, density={density}).to(device); eye=sparse_eye(n={n}).to(device);",
-            globals=dict(
-                create_sparse_matrix=create_sparse_matrix,
-                sparse_eye=sparse_eye,
-                extract_diagonal_coalesce=extract_diagonal_coalesce,
-                extract_diagonal_explicit_loop=extract_diagonal_explicit_loop,
-                extract_diagonal_manual_coalesce=extract_diagonal_manual_coalesce,
-                device=device,
-            ),
-            # description needs to be present
-            description=f"n={n}",
-            label=f"density={density}",
-            num_threads=num_threads,
-        ).blocked_autorange()
-        print(measurement)
-        measurements.append(measurement)
-        method = stmt.split("(")[0].replace("extract_diagonal_", "")
-        data.append((method, n, density, num_threads, measurement.median, measurement.mean, measurement.iqr))
-    comparison = Compare(measurements)
-    comparison.colorize()
-    comparison.trim_significant_figures()
-    comparison.print()
-    df = pandas.DataFrame(data=data, columns=["method", "n", "density", "num_threads", "median", "mean", "iqr"])
-    df.to_csv("./times.tsv", sep="\t", index=False)
-    grid: seaborn.FacetGrid = seaborn.relplot(
-        data=df,
-        x="n",
-        y="median",
-        hue="method",
-        size="density",
-        style="num_threads",
-        kind="line",
-    )
-    grid.set(xscale="log", ylabel="median time [s]")
-    grid.tight_layout()
-    grid.savefig("./times.svg")
+    with tqdm(
+        (
+            cls(kwargs=dict(n=n, density=density, device=device))
+            for cls, n, density, device in itertools.product(
+                (ExplicitPython, Coalesce, ManualCoalesce),
+                n_grid,
+                density_grid,
+                devices,
+            )
+        )
+    ) as progress:
+        for task in progress:
+            progress.set_description(str(task))
+            measurements.append(task.buffered_measure())
+    print(measurements)
 
 
 if __name__ == "__main__":
-    test_extract_diagonal()
-    time_extract_diagonal()
+    main()
