@@ -234,11 +234,11 @@ def main():
             progress.set_description(str(task))
             n, density, device, matrix_format = [task.kwargs[k] for k in ("n", "density", "device", "matrix_format")]
             # too slow
-            if n > 8_000 and isinstance(task, ExplicitPython):
+            if n > 8_000 and isinstance(task, (ExplicitPython, ExplicitPythonCSR)):
                 continue
             nnz = n**2 * density
             # high memory consumption
-            if nnz > 10_000_000:
+            if nnz > 10_000_000 or (isinstance(task, DenseDiag) and n > 16_000):
                 continue
             with suppress(NotImplementedError, RuntimeError):
                 measurement = task.buffered_measure()
