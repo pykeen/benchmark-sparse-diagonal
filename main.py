@@ -1,9 +1,10 @@
 """Benchmarks for random walk positional encoding."""
+from contextlib import suppress
 import hashlib
 import itertools
 import pathlib
 from collections import ChainMap
-from typing import Any, Collection, Iterable, Mapping, Optional, Tuple
+from typing import Any, Collection, Iterable, Literal, Mapping, Optional, Tuple
 
 import pystow
 import torch
@@ -71,16 +72,26 @@ def dict_difference(d: Mapping[str, Any], exclude: Collection[str]) -> Mapping[s
     return {k: v for k, v in d.items() if k not in exclude}
 
 
-def create_sparse_matrix(n: int, density: float, device: Optional[torch.device] = None) -> torch.Tensor:
+SparseMatrixFormat = Literal["coo", "csr"]
+
+
+def create_sparse_matrix(
+    n: int, density: float, device: Optional[torch.device] = None, matrix_format: SparseMatrixFormat = "coo"
+) -> torch.Tensor:
     """Create a sparse matrix of the given size and (maximum) density."""
     # TODO: the sparsity pattern may not be very natural for a graph
     nnz = int(n**2 * density)
     indices = torch.randint(n, size=(2, nnz), device=device)
     values = torch.ones(nnz, device=device)
-    return torch.sparse_coo_tensor(indices=indices, values=values, size=(n, n))
+    x = torch.sparse_coo_tensor(indices=indices, values=values, size=(n, n))
+    if matrix_format == "coo":
+        return x
+    return x.to_sparse_csr()
 
 
-def sparse_eye(n: int, device: Optional[torch.device] = None) -> torch.Tensor:
+def sparse_eye(
+    n: int, device: Optional[torch.device] = None, matrix_format: SparseMatrixFormat = "coo"
+) -> torch.Tensor:
     """
     Create a sparse diagonal matrix.
 
@@ -93,13 +104,23 @@ def sparse_eye(n: int, device: Optional[torch.device] = None) -> torch.Tensor:
         a sparse diagonal matrix
     """
     indices = torch.arange(n, device=device).unsqueeze(0).repeat(2, 1)
-    return torch.sparse_coo_tensor(indices=indices, values=torch.ones(n, device=device))
+    x = torch.sparse_coo_tensor(indices=indices, values=torch.ones(n, device=device))
+    if matrix_format == "coo":
+        return x
+    return x.to_sparse_csr()
 
 
 class DiagonalExtraction(BenchmarkItem):
-    def prepare(self, n: int, density: float, device: Optional[torch.device] = None, **kwargs) -> Mapping[str, Any]:
+    def prepare(
+        self,
+        n: int,
+        density: float,
+        device: Optional[torch.device] = None,
+        matrix_format: SparseMatrixFormat = "coo",
+        **kwargs,
+    ) -> Mapping[str, Any]:
         # TODO: the sparsity pattern may not be very natural for a graph
-        matrix = create_sparse_matrix(n=n, density=density, device=device)
+        matrix = create_sparse_matrix(n=n, density=density, device=device, matrix_format=matrix_format)
         return ChainMap(dict(matrix=matrix), kwargs)
 
     def iter_key_parts(self) -> Iterable[Tuple[str, Any]]:
@@ -124,10 +145,34 @@ class ExplicitPython(DiagonalExtraction):
         return d
 
 
+class ExplicitPythonCSR(DiagonalExtraction):
+    """Extract diagonal by item access and Python for-loop."""
+
+    def call(self, matrix: torch.Tensor, **kwargs):
+        if not matrix.is_sparse_csr:
+            raise NotImplementedError
+        n = matrix.shape[0]
+        d = torch.zeros(n, device=matrix.device)
+
+        crow = matrix.crow_indices()
+        col = matrix.col_indices()
+        values = matrix.values()
+
+        for i, (start, stop) in enumerate(zip(crow, crow[1:])):
+            this_col = col[start:stop]
+            this_values = values[start:stop]
+            v = this_values[this_col == i]
+            if v.numel():
+                d[i] = v
+        return d
+
+
 class Coalesce(DiagonalExtraction):
-    def prepare(self, n: int, **kwargs) -> Mapping[str, Any]:
+    def prepare(self, n: int, matrix_format: SparseMatrixFormat = "coo", **kwargs) -> Mapping[str, Any]:
         kwargs = super().prepare(n=n, **kwargs)
-        return ChainMap(dict(eye=sparse_eye(n=n, device=kwargs.get("matrix").device)), kwargs)
+        return ChainMap(
+            dict(eye=sparse_eye(n=n, device=kwargs.get("matrix").device), matrix_format=matrix_format), kwargs
+        )
 
     def call(self, matrix: torch.Tensor, eye: torch.Tensor, **kwargs) -> torch.Tensor:
         """Extract diagonal using coalesce."""
@@ -156,29 +201,38 @@ class ManualCoalesce(DiagonalExtraction):
         return d.scatter_add(dim=0, index=diagonal_indices, src=diagonal_values)
 
 
+class DenseDiag(DiagonalExtraction):
+    """Extract diagonal by item access and Python for-loop."""
+
+    def call(self, matrix: torch.Tensor, **kwargs):
+        return torch.diag(matrix.to_dense())
+
+
 def main():
     """Time the different variants."""
     # fb15k237 sparsity ~ 300k / 15_000**2 = 0.001
     density_grid = (1.0e-05, 1.0e-04, 1.0e-03, 1.0e-02)
     n_grid = (500, 1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 512_000)
     devices = sorted({torch.device("cpu"), resolve_device(device=None)}, key=lambda d: d.type)
-    cls_grid = (ExplicitPython, Coalesce, ManualCoalesce)
+    cls_grid = (ExplicitPython, ExplicitPythonCSR, Coalesce, ManualCoalesce, DenseDiag)
+    format_grid = ("coo", "csr")
     data = []
     with tqdm(
         (
-            cls(kwargs=dict(n=n, density=density, device=device))
-            for cls, n, density, device in itertools.product(
+            cls(kwargs=dict(n=n, density=density, device=device, matrix_format=matrix_format))
+            for cls, n, density, device, matrix_format in itertools.product(
                 cls_grid,
                 n_grid,
                 density_grid,
                 devices,
+                format_grid,
             )
         ),
-        total=numpy.prod(list(map(len, (cls_grid, n_grid, density_grid, devices)))),
+        total=numpy.prod(list(map(len, (cls_grid, n_grid, density_grid, devices, format_grid)))),
     ) as progress:
         for task in progress:
             progress.set_description(str(task))
-            n, density, device = [task.kwargs[k] for k in ("n", "density", "device")]
+            n, density, device, matrix_format = [task.kwargs[k] for k in ("n", "density", "device", "matrix_format")]
             # too slow
             if n > 8_000 and isinstance(task, ExplicitPython):
                 continue
@@ -186,10 +240,24 @@ def main():
             # high memory consumption
             if nnz > 10_000_000:
                 continue
-            measurement = task.buffered_measure()
-            data.append((task.name, n, density, device, measurement.median, measurement.mean, measurement.iqr))
+            with suppress(NotImplementedError, RuntimeError):
+                measurement = task.buffered_measure()
+                data.append(
+                    (
+                        task.name,
+                        n,
+                        density,
+                        device,
+                        matrix_format,
+                        measurement.median,
+                        measurement.mean,
+                        measurement.iqr,
+                    )
+                )
     # create table
-    df = pandas.DataFrame(data=data, columns=["name", "n", "density", "device", "median", "mean", "iqr"])
+    df = pandas.DataFrame(
+        data=data, columns=["name", "n", "density", "device", "matrix_format", "median", "mean", "iqr"]
+    )
     df["device"] = df["device"].astype(str)
     keys = ["device", "n", "density", "name"]
     df = df.sort_values(by=keys)
@@ -202,6 +270,7 @@ def main():
         size="density",
         kind="line",
         hue="name",
+        style="matrix_format",
     )
     grid.set(yscale="log", xscale="log")
     grid.savefig("./img/comparison.svg")
