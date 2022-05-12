@@ -69,6 +69,7 @@ Hence, we study different variants of extracting the diagonal and measure their 
   version of the matrix, obtained via
   [`torch.Tensor.to_dense`](https://pytorch.org/docs/stable/generated/torch.Tensor.to_dense.html).
   Due to materializing the dense matrix, this method requires a large amount of memory (O(n^2)).
+  It is applicable for both, COO and CSR format.
 ```python
 d = torch.diagonal(matrix.to_dense())
 ```
@@ -137,6 +138,22 @@ for i, (start, stop) in enumerate(zip(crow, crow[1:])):
     v = this_values[this_col == i]
     if v.numel():
         d[i] = v
+```
+  
+4. Coalesce: In this variant, we perform an element-wise multiplication with a sparse identity
+  matrix, and then use [`torch.Tensor.values`](https://pytorch.org/docs/stable/generated/torch.Tensor.values.html)
+  and [`torch.Tensor.indices`](https://pytorch.org/docs/stable/generated/torch.Tensor.indices.html)
+  to obtain the values and indices of non-zero elements. This operation does only support the COO format.
+  Moreover, it requires a coalesced sparse COO tensor, i.e., a prior call to
+  [`torch.Tensor.coalesce`](https://pytorch.org/docs/stable/generated/torch.Tensor.coalesce.html).
+```python
+n = matrix.shape[0]
+d = torch.zeros(n, device=matrix.device)
+
+d_sparse = (matrix * eye).coalesce()
+indices = d_sparse.indices()
+values = d_sparse.values()
+d[indices] = values
 ```
 
 ## Results
