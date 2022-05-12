@@ -1,2 +1,68 @@
 # Benchmark extraction of diagonal entries of a sparse matrix
+This repository contains benchmarking results for different ways to extract diagonal entries from a sparse matrix in
+PyTorch.
+
+## Background
+This repository originates from implementing the *Random Walk Positional Encoding* from
+[Dwivedi et al., 2022](https://arxiv.org/abs/2110.07875) in PyTorch for
+[pykeen#918](https://github.com/pykeen/pykeen/pull/918).
+This positional encoding is given as 
+```
+x_i = [R[i, i], R^2[i, i], ..., R^k[i, i]]
+```
+where `R = AD^{-1}` denotes the column-wise normalized adjacency matrix. Since typically adjacency matrices are
+sparse, we want to use [`torch.sparse`](https://pytorch.org/docs/stable/sparse.html) for calculating the [matrix
+powers.](https://github.com/pykeen/pykeen/blob/9025a7171f561d964652263269c751cf44b208d7/src/pykeen/nn/utils.py#L95-L116)
+As of PyTorch 1.11, sparse matrices are in beta status and not all operations support sparse matrices.
+Particularly, [`torch.diagonal`](https://pytorch.org/docs/stable/generated/torch.diagonal.html) does not support
+sparse matrices,
+```python-console
+>>> torch.diagonal(A)
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+RuntimeError: sparse tensors do not have strides
+```
+nor can we use advanced indexing via `A[torch.arange(n), torch.arange(n)]`
+<details>
+
+```python-console
+>>> A[torch.arange(n), torch.arange(n)]
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NotImplementedError: Could not run 'aten::index.Tensor' with arguments from the 'SparseCPU' backend. This could be because the operator doesn't exist for this backend, or was omitted during the selective/custom build process (if using custom build). If you are a Facebook employee using PyTorch on mobile, please visit https://fburl.com/ptmfixes for possible resolutions. 'aten::index.Tensor' is only available for these backends: [CPU, QuantizedCPU, BackendSelect, Python, Named, Conjugate, Negative, ZeroTensor, ADInplaceOrView, AutogradOther, AutogradCPU, AutogradCUDA, AutogradXLA, AutogradLazy, AutogradXPU, AutogradMLC, AutogradHPU, AutogradNestedTensor, AutogradPrivateUse1, AutogradPrivateUse2, AutogradPrivateUse3, Tracer, AutocastCPU, Autocast, Batched, VmapMode, Functionalize].
+
+CPU: registered at aten/src/ATen/RegisterCPU.cpp:21063 [kernel]
+QuantizedCPU: registered at aten/src/ATen/RegisterQuantizedCPU.cpp:1258 [kernel]
+BackendSelect: fallthrough registered at ../aten/src/ATen/core/BackendSelectFallbackKernel.cpp:3 [backend fallback]
+Python: registered at ../aten/src/ATen/core/PythonFallbackKernel.cpp:47 [backend fallback]
+Named: registered at ../aten/src/ATen/core/NamedRegistrations.cpp:7 [backend fallback]
+Conjugate: registered at ../aten/src/ATen/ConjugateFallback.cpp:18 [backend fallback]
+Negative: registered at ../aten/src/ATen/native/NegateFallback.cpp:18 [backend fallback]
+ZeroTensor: registered at ../aten/src/ATen/ZeroTensorFallback.cpp:86 [backend fallback]
+ADInplaceOrView: fallthrough registered at ../aten/src/ATen/core/VariableFallbackKernel.cpp:64 [backend fallback]
+AutogradOther: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradCPU: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradCUDA: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradXLA: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradLazy: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradXPU: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradMLC: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradHPU: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradNestedTensor: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradPrivateUse1: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradPrivateUse2: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+AutogradPrivateUse3: registered at ../torch/csrc/autograd/generated/VariableType_1.cpp:10665 [autograd kernel]
+Tracer: registered at ../torch/csrc/autograd/generated/TraceType_1.cpp:11342 [kernel]
+AutocastCPU: fallthrough registered at ../aten/src/ATen/autocast_mode.cpp:461 [backend fallback]
+Autocast: fallthrough registered at ../aten/src/ATen/autocast_mode.cpp:305 [backend fallback]
+Batched: registered at ../aten/src/ATen/BatchingRegistrations.cpp:1059 [backend fallback]
+VmapMode: fallthrough registered at ../aten/src/ATen/VmapModeRegistrations.cpp:33 [backend fallback]
+Functionalize: registered at ../aten/src/ATen/FunctionalizeFallbackKernel.cpp:52 [backend fallback]
+```
+</details>
+
+Hence, we study different variants of extracting the diagonal and measure their performance.
+
+## Results
+
 ![Comparison](./img/comparison.svg "Comparison")
