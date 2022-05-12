@@ -62,6 +62,82 @@ Functionalize: registered at ../aten/src/ATen/FunctionalizeFallbackKernel.cpp:52
 </details>
 
 Hence, we study different variants of extracting the diagonal and measure their performance.
+  
+## Variants
+
+1. [`torch.diagonal`](https://pytorch.org/docs/stable/generated/torch.diagonal.html) on the dense
+  version of the matrix, obtained via
+  [`torch.Tensor.to_dense`](https://pytorch.org/docs/stable/generated/torch.Tensor.to_dense.html).
+  Due to materializing the dense matrix, this method requires a large amount of memory (O(n^2)).
+```python
+d = torch.diagonal(matrix.to_dense())
+```
+  
+2. Python for-loop, and item access. Due to using a Python loop, this variant is likely to be
+  inefficient. Moreover, it is only applicable to the COO-format, an fails for CSR adjacency
+  matrices (cf. details collapsible)
+```python
+n = matrix.shape[0]
+d = torch.zeros(n, device=matrix.device)
+for i in range(n):
+    d[i] = matrix[i, i]
+```
+<details>
+
+```python-traceback
+Traceback (most recent call last):
+    d[i] = matrix[i, i]
+NotImplementedError: Could not run 'aten::as_strided' with arguments from the 'SparseCsrCPU' backend. This could be because the operator doesn't exist for this backend, or was omitted during the selective/custom build process (if using custom build). If you are a Facebook employee using PyTorch on mobile, please visit https://fburl.com/ptmfixes for possible resolutions. 'aten::as_strided' is only available for these backends: [CPU, Meta, QuantizedCPU, BackendSelect, Python, Named, Conjugate, Negative, ZeroTensor, ADInplaceOrView, AutogradOther, AutogradCPU, AutogradCUDA, AutogradXLA, AutogradLazy, AutogradXPU, AutogradMLC, AutogradHPU, AutogradNestedTensor, AutogradPrivateUse1, AutogradPrivateUse2, AutogradPrivateUse3, Tracer, AutocastCPU, Autocast, Batched, VmapMode, Functionalize].
+
+CPU: registered at aten/src/ATen/RegisterCPU.cpp:21063 [kernel]
+Meta: registered at aten/src/ATen/RegisterMeta.cpp:14951 [kernel]
+QuantizedCPU: registered at aten/src/ATen/RegisterQuantizedCPU.cpp:1258 [kernel]
+BackendSelect: fallthrough registered at ../aten/src/ATen/core/BackendSelectFallbackKernel.cpp:3 [backend fallback]
+Python: registered at ../aten/src/ATen/core/PythonFallbackKernel.cpp:47 [backend fallback]
+Named: fallthrough registered at ../aten/src/ATen/core/NamedRegistrations.cpp:11 [kernel]
+Conjugate: fallthrough registered at ../aten/src/ATen/ConjugateFallback.cpp:22 [kernel]
+Negative: fallthrough registered at ../aten/src/ATen/native/NegateFallback.cpp:22 [kernel]
+ZeroTensor: registered at aten/src/ATen/RegisterZeroTensor.cpp:167 [kernel]
+ADInplaceOrView: registered at ../torch/csrc/autograd/generated/ADInplaceOrViewType_0.cpp:2566 [kernel]
+AutogradOther: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradCPU: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradCUDA: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradXLA: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradLazy: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradXPU: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradMLC: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradHPU: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradNestedTensor: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradPrivateUse1: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradPrivateUse2: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+AutogradPrivateUse3: registered at ../torch/csrc/autograd/generated/VariableType_0.cpp:9932 [autograd kernel]
+Tracer: registered at ../torch/csrc/autograd/generated/TraceType_0.cpp:11618 [kernel]
+AutocastCPU: fallthrough registered at ../aten/src/ATen/autocast_mode.cpp:461 [backend fallback]
+Autocast: fallthrough registered at ../aten/src/ATen/autocast_mode.cpp:305 [backend fallback]
+Batched: registered at ../aten/src/ATen/BatchingRegistrations.cpp:1063 [kernel]
+VmapMode: fallthrough registered at ../aten/src/ATen/VmapModeRegistrations.cpp:33 [backend fallback]
+Functionalize: registered at aten/src/ATen/RegisterFunctionalization_0.cpp:4018 [kernel]  
+```
+</details>
+
+3. Python for-loop (CSR): Here, we iterate over the rows, select the corresponding column indices, and
+  determine, whether one of them corresponds to the diagonal entry. In that case, we select the
+  corresponding value and copy it into the result.
+```python
+n = matrix.shape[0]
+d = torch.zeros(n, device=matrix.device)
+
+crow = matrix.crow_indices()
+col = matrix.col_indices()
+values = matrix.values()
+
+for i, (start, stop) in enumerate(zip(crow, crow[1:])):
+    this_col = col[start:stop]
+    this_values = values[start:stop]
+    v = this_values[this_col == i]
+    if v.numel():
+        d[i] = v
+```
 
 ## Results
 
