@@ -65,6 +65,18 @@ Hence, we study different variants of extracting the diagonal and measure their 
   
 ## Variants
 
+### Overview
+
+| \# | Variant | COO | CSR |
+| -- | -- | :--:| :--: |
+| 1 | DenseDiag | ✓ | ✓ |
+| 2 | ExplicitPython | ✓ |  |
+| 3 | ExplicitPythonCSR |  | ✓ |
+| 4 | Coalesce | ✓ |  |
+| 5 | ManualCoalesce | ✓ |  |
+  
+### Details
+
 1. [`torch.diagonal`](https://pytorch.org/docs/stable/generated/torch.diagonal.html) on the dense
   version of the matrix, obtained via
   [`torch.Tensor.to_dense`](https://pytorch.org/docs/stable/generated/torch.Tensor.to_dense.html).
