@@ -85,7 +85,7 @@ Hence, we study different variants of extracting the diagonal and measure their 
   
 ### Details
 
-1. [`torch.diagonal`](https://pytorch.org/docs/stable/generated/torch.diagonal.html) on the dense
+1. **Torch**: [`torch.diagonal`](https://pytorch.org/docs/stable/generated/torch.diagonal.html) on the dense
    version of the matrix, obtained via
    [`torch.Tensor.to_dense`](https://pytorch.org/docs/stable/generated/torch.Tensor.to_dense.html).
    Due to materializing the dense matrix, this method requires a large amount of memory (O(n^2)).
@@ -95,7 +95,7 @@ Hence, we study different variants of extracting the diagonal and measure their 
    d = torch.diagonal(matrix.to_dense())
    ```
 
-2. Python for-loop, and item access. Due to using a Python loop, this variant is likely to be
+2. **Python for-loop, and item access**: Due to using a Python loop, this variant is likely to be
    inefficient. Moreover, it is only applicable to the COO-format, an fails for CSR adjacency
    matrices (cf. details collapsible)
 
@@ -145,7 +145,7 @@ Hence, we study different variants of extracting the diagonal and measure their 
 
    </details>
 
-3. Python for-loop (CSR): Here, we iterate over the rows, select the corresponding column indices, and
+3. **Python for-loop (CSR)**: Here, we iterate over the rows, select the corresponding column indices, and
    determine, whether one of them corresponds to the diagonal entry. In that case, we select the
    corresponding value and copy it into the result.
 
@@ -165,7 +165,7 @@ Hence, we study different variants of extracting the diagonal and measure their 
            d[i] = v
    ```
   
-4. Coalesce: In this variant, we perform an element-wise multiplication with a sparse identity
+4. **Coalesce**: In this variant, we perform an element-wise multiplication with a sparse identity
    matrix, and then use [`torch.Tensor.values`](https://pytorch.org/docs/stable/generated/torch.Tensor.values.html)
    and [`torch.Tensor.indices`](https://pytorch.org/docs/stable/generated/torch.Tensor.indices.html)
    to obtain the values and indices of non-zero elements. This operation does only support the COO format.
@@ -182,11 +182,12 @@ Hence, we study different variants of extracting the diagonal and measure their 
    d[indices] = values
    ```
 
-6. Manual Coalesce: Since the most expensive part of the previous solution is the coalesce step,
+5. **Manual Coalesce**: Since the most expensive part of the previous solution is the coalesce step,
    we investigate a variant with directly operates on the raw, uncoalesced `_values` and `_indices`.
    Hereby, we avoid having to coalesce non-diagonal entries. Since we operate on the uncoalesced
    view, there may be multiple entries for the same index, we need to be aggregated via
    [`scatter_add_`](https://pytorch.org/docs/stable/generated/torch.Tensor.scatter_add_.html).
+
    ```python
    n = matrix.shape[0]
    d = torch.zeros(n, device=matrix.device)
