@@ -156,6 +156,22 @@ values = d_sparse.values()
 d[indices] = values
 ```
 
+5. Manual Coalesce: Since the most expensive part of the previous solution is the coalesce step,
+  we investigate a variant with directly operates on the raw, uncoalesced `_values` and `_indices`.
+  Hereby, we avoid having to coalesce non-diagonal entries. Since we operate on the uncoalesced
+  view, there may be multiple entries for the same index, we need to be aggregated via
+  [`scatter_add_`](https://pytorch.org/docs/stable/generated/torch.Tensor.scatter_add_.html).
+```python
+n = matrix.shape[0]
+d = torch.zeros(n, device=matrix.device)
+
+indices = matrix._indices()
+mask = indices[0] == indices[1]
+diagonal_values = matrix._values()[mask]
+diagonal_indices = indices[0][mask]
+
+d = d.scatter_add(dim=0, index=diagonal_indices, src=diagonal_values)
+```
 ## Results
 
 ![Comparison](./img/comparison.svg "Comparison")
