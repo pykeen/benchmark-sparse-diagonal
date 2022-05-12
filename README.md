@@ -225,6 +225,4 @@ While it accesses private methods of sparse tensors (which themselves are consid
 as of PyTorch 1.11), and thus may break with future releases, the effort of exchanging it by any
 of the other existing implementations, or even better a variant build into PyTorch, is neglicible.
 We thus opt for using the manual coalescing approach for
-PyKEEN#918](https://github.com/pykeen/pykeen/pull/918).
-
-
+[PyKEEN#918](https://github.com/pykeen/pykeen/pull/918).
